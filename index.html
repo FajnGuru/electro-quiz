@@ -143,7 +143,7 @@
                 </div>
             </div>
 
-            <div class="max-w-2xl mx-auto mb-5 flex flex-col sm:flex-row items-start sm:items-center justify-center gap-3 sm:gap-6 text-left">
+            <div class="max-w-2xl mx-auto mb-5 flex flex-col sm:flex-row flex-wrap items-start sm:items-center justify-center gap-3 sm:gap-6 text-left">
                 <label class="inline-flex items-center gap-2 cursor-pointer select-none text-sm text-slate-300">
                     <input type="checkbox" id="shuffle-questions-cb" class="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 focus:ring-amber-500 focus:ring-offset-0 cursor-pointer" onchange="onShuffleSettingsChange()">
                     <span>Zamíchat otázky</span>
@@ -151,6 +151,10 @@
                 <label class="inline-flex items-center gap-2 cursor-pointer select-none text-sm text-slate-300">
                     <input type="checkbox" id="shuffle-options-cb" class="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 focus:ring-amber-500 focus:ring-offset-0 cursor-pointer" onchange="onShuffleSettingsChange()">
                     <span>Zamíchat i odpovědi</span>
+                </label>
+                <label class="inline-flex items-center gap-2 cursor-pointer select-none text-sm text-slate-300">
+                    <input type="checkbox" id="avoid-repeat-answers-cb" class="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 focus:ring-amber-500 focus:ring-offset-0 cursor-pointer" onchange="onShuffleSettingsChange()">
+                    <span>Hlídat opakování odpovědí</span>
                 </label>
             </div>
 
@@ -308,6 +312,7 @@
         // Global State
         let questionsDatabase = generateDefaultDatabase();
         let activeQuestions = [];
+        let activeOptionOrders = []; // předpočítané pořadí odpovědí pro běh (TTS + letter rule)
         let currentIdx = 0;
         let score = 0;
         let incorrectQuestionsData = [];
@@ -320,11 +325,13 @@
         // Odpovědi: globálně default zapnuto. Uložená hodnota má přednost před defaultem režimu.
         const SHUFFLE_DEFAULTS = {
             shuffleQuestions: { random10: true, standard30: true, full540: false },
-            shuffleOptions: true
+            shuffleOptions: true,
+            avoidRepeatAnswers: true
         };
         let shuffleSettings = {
             shuffleQuestions: { ...SHUFFLE_DEFAULTS.shuffleQuestions },
-            shuffleOptions: SHUFFLE_DEFAULTS.shuffleOptions
+            shuffleOptions: SHUFFLE_DEFAULTS.shuffleOptions,
+            avoidRepeatAnswers: SHUFFLE_DEFAULTS.avoidRepeatAnswers
         };
 
         function loadShuffleSettings() {
@@ -348,6 +355,9 @@
                     if (typeof parsed.shuffleOptions === 'boolean') {
                         shuffleSettings.shuffleOptions = parsed.shuffleOptions;
                     }
+                    if (typeof parsed.avoidRepeatAnswers === 'boolean') {
+                        shuffleSettings.avoidRepeatAnswers = parsed.avoidRepeatAnswers;
+                    }
                 }
             } catch (e) { /* ignore */ }
         }
@@ -361,15 +371,19 @@
         function syncShuffleCheckboxes() {
             const qCb = document.getElementById('shuffle-questions-cb');
             const oCb = document.getElementById('shuffle-options-cb');
+            const aCb = document.getElementById('avoid-repeat-answers-cb');
             if (qCb) qCb.checked = !!shuffleSettings.shuffleQuestions[quizMode];
             if (oCb) oCb.checked = !!shuffleSettings.shuffleOptions;
+            if (aCb) aCb.checked = !!shuffleSettings.avoidRepeatAnswers;
         }
 
         function onShuffleSettingsChange() {
             const qCb = document.getElementById('shuffle-questions-cb');
             const oCb = document.getElementById('shuffle-options-cb');
+            const aCb = document.getElementById('avoid-repeat-answers-cb');
             if (qCb) shuffleSettings.shuffleQuestions[quizMode] = qCb.checked;
             if (oCb) shuffleSettings.shuffleOptions = oCb.checked;
+            if (aCb) shuffleSettings.avoidRepeatAnswers = aCb.checked;
             saveShuffleSettings();
         }
 
@@ -395,6 +409,116 @@
                 [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
             }
             return array;
+        }
+
+        function normalizeAnswer(s) {
+            return String(s == null ? '' : s)
+                .trim()
+                .toLocaleLowerCase('cs')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/[^\p{L}\p{N}]+/gu, ' ')
+                .trim();
+        }
+
+        function correctAnswerNorm(q) {
+            if (!q || !Array.isArray(q.options) || typeof q.correct !== 'number') return '';
+            return normalizeAnswer(q.options[q.correct]);
+        }
+
+        function questionStemNorm(q) {
+            const raw = String(q && q.question || '').replace(/^\[.*?\]\s*/, '');
+            return normalizeAnswer(raw);
+        }
+
+        /** Greedy: žádné dvě po sobě se stejným klíčem (correct answer / question stem). Best-effort. */
+        function spaceOutByKey(arr, keyFn) {
+            const a = arr;
+            for (let pass = 0; pass < 3; pass++) {
+                for (let i = 0; i < a.length - 1; i++) {
+                    const k1 = keyFn(a[i]);
+                    const k2 = keyFn(a[i + 1]);
+                    if (!k1 || !k2 || k1 !== k2) continue;
+                    let swapped = false;
+                    for (let j = i + 2; j < a.length; j++) {
+                        const kj = keyFn(a[j]);
+                        if (kj && kj !== k1) {
+                            const nextOk = (i + 2 >= a.length) || keyFn(a[i + 2]) !== kj;
+                            if (!nextOk && j < a.length - 1) continue;
+                            const tmp = a[i + 1];
+                            a[i + 1] = a[j];
+                            a[j] = tmp;
+                            swapped = true;
+                            break;
+                        }
+                    }
+                    if (!swapped) {
+                        // best-effort: nic nenajdeme (dominance) — necháme
+                    }
+                }
+            }
+            return a;
+        }
+
+        function spaceOutCorrectAnswers(arr) {
+            return spaceOutByKey(arr, correctAnswerNorm);
+        }
+
+        function spaceOutQuestionTexts(arr) {
+            return spaceOutByKey(arr, questionStemNorm);
+        }
+
+        /** Výběr N otázek z poolu s preferencí jiné správné odpovědi než u předchozí. */
+        function pickActiveFromPool(pool, count) {
+            const remaining = pool.slice();
+            const active = [];
+            while (active.length < count && remaining.length) {
+                let pickIdx = 0;
+                if (shuffleSettings.avoidRepeatAnswers && active.length > 0) {
+                    const prev = correctAnswerNorm(active[active.length - 1]);
+                    const found = remaining.findIndex(q => {
+                        const n = correctAnswerNorm(q);
+                        return n && n !== prev;
+                    });
+                    if (found >= 0) pickIdx = found;
+                }
+                active.push(remaining.splice(pickIdx, 1)[0]);
+            }
+            if (shuffleSettings.avoidRepeatAnswers) spaceOutCorrectAnswers(active);
+            return active;
+        }
+
+        /** Předpočítá pořadí odpovědí pro celý běh; hlídá max 2 stejná písmena správné odpovědi za sebou. */
+        function buildOptionOrders(questions) {
+            const orders = [];
+            const letterHistory = [];
+            for (let qi = 0; qi < questions.length; qi++) {
+                const q = questions[qi];
+                let opts = (q.options || []).map((opt, idx) => ({ text: opt, oIdx: idx }));
+                if (shuffleSettings.shuffleOptions) {
+                    let ok = false;
+                    for (let attempt = 0; attempt < 24; attempt++) {
+                        shuffleArray(opts);
+                        const letter = opts.findIndex(o => o.oIdx === q.correct);
+                        const blocked = shuffleSettings.avoidRepeatAnswers
+                            && letterHistory.length >= 2
+                            && letterHistory[letterHistory.length - 1] === letter
+                            && letterHistory[letterHistory.length - 2] === letter;
+                        if (!blocked) { ok = true; break; }
+                        // nový pokus — znovu zamíchat kopii
+                        opts = (q.options || []).map((opt, idx) => ({ text: opt, oIdx: idx }));
+                    }
+                    if (!ok) {
+                        // last resort: rotuj dokud letter != last
+                        opts = (q.options || []).map((opt, idx) => ({ text: opt, oIdx: idx }));
+                        shuffleArray(opts);
+                    }
+                }
+                const letter = opts.findIndex(o => o.oIdx === q.correct);
+                letterHistory.push(letter);
+                orders.push(opts);
+            }
+            return orders;
         }
 
         // --- Custom Modal System ---
@@ -504,9 +628,10 @@
         function speakCurrentQuestion() {
             if (activeQuestions.length === 0) return;
             const q = activeQuestions[currentIdx];
+            const order = activeOptionOrders[currentIdx] || (q.options || []).map((opt, idx) => ({ text: opt, oIdx: idx }));
             let text = `${q.question}. Možnosti: `;
-            q.options.forEach((opt, idx) => {
-                text += `Za ${String.fromCharCode(65 + idx)}: ${opt}. `;
+            order.forEach((item, idx) => {
+                text += `Za ${String.fromCharCode(65 + idx)}: ${item.text}. `;
             });
             speakText(text);
         }
@@ -566,39 +691,32 @@
             // Zamíchání otázek (Fisher–Yates) – jen když je zapnutý přepínač pro aktuální režim
             if (shuffleSettings.shuffleQuestions[quizMode]) {
                 shuffleArray(pool);
+                // Mírný dedup stejného textu otázky (starý filtr, po normalize)
+                spaceOutQuestionTexts(pool);
+            }
 
-                // Anti-repetitivní filtr jen po zamíchání
-                for (let i = 0; i < pool.length - 1; i++) {
-                    let q1 = pool[i].question.replace(/^\[.*?\]\s*/, '');
-                    let q2 = pool[i + 1].question.replace(/^\[.*?\]\s*/, '');
-                    
-                    if (q1 === q2) {
-                        for (let j = i + 2; j < pool.length; j++) {
-                            let q3 = pool[j].question.replace(/^\[.*?\]\s*/, '');
-                            if (q1 !== q3) {
-                                let temp = pool[i + 1];
-                                pool[i + 1] = pool[j];
-                                pool[j] = temp;
-                                break;
-                            }
-                        }
-                    }
+            let targetCount = pool.length;
+            if (quizMode === 'random10') targetCount = Math.min(10, pool.length);
+            else if (quizMode === 'standard30') targetCount = Math.min(30, pool.length);
+
+            if (shuffleSettings.avoidRepeatAnswers && targetCount < pool.length) {
+                // Short test: vybírat z celého poolu s ohledem na správnou odpověď
+                activeQuestions = pickActiveFromPool(pool, targetCount);
+            } else {
+                activeQuestions = pool.slice(0, targetCount);
+                if (shuffleSettings.avoidRepeatAnswers) {
+                    spaceOutCorrectAnswers(activeQuestions);
                 }
             }
 
-            if (quizMode === 'random10') {
-                activeQuestions = pool.slice(0, 10);
-            } else if (quizMode === 'standard30') {
-                activeQuestions = pool.slice(0, 30);
-            } else {
-                activeQuestions = pool; 
-            }
+            activeOptionOrders = buildOptionOrders(activeQuestions);
 
             document.getElementById('start-screen').classList.add('hidden');
             document.getElementById('results-screen').classList.add('hidden');
             document.getElementById('quiz-screen').classList.remove('hidden');
             loadQuestion();
         }
+
 
         function loadQuestion() {
             answeredCurrent = false;
@@ -612,10 +730,10 @@
             document.getElementById('progress-bar').style.width = `${((currentIdx) / activeQuestions.length) * 100}%`;
             document.getElementById('question-title').textContent = q.question;
 
-            let opts = q.options.map((opt, idx) => ({ text: opt, oIdx: idx }));
-            // Zamíchání odpovědí + remap přes oIdx zůstává správný (correct index v datech)
-            if (shuffleSettings.shuffleOptions) {
-                shuffleArray(opts);
+            // Předpočítané pořadí (buildOptionOrders) — stejné pro UI i TTS; oIdx drží správnost
+            let opts = activeOptionOrders[currentIdx];
+            if (!opts) {
+                opts = q.options.map((opt, idx) => ({ text: opt, oIdx: idx }));
             }
 
             const container = document.getElementById('options-container');

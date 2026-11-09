@@ -461,7 +461,35 @@
         }
 
         function spaceOutCorrectAnswers(arr) {
-            return spaceOutByKey(arr, correctAnswerNorm);
+            // Frekvenční greedy: vždy vyber největší zbývající skupinu s jinou odpovědí než předchozí.
+            // Dosáhne 0 consecutive, pokud žádná odpověď nemá majority > (n+1)/2.
+            if (!arr || arr.length < 2) return arr;
+            const groups = new Map();
+            for (const q of arr) {
+                let k = correctAnswerNorm(q);
+                if (!k) k = '__empty_' + groups.size;
+                if (!groups.has(k)) groups.set(k, []);
+                groups.get(k).push(q);
+            }
+            const out = [];
+            let prev = null;
+            const total = arr.length;
+            for (let n = 0; n < total; n++) {
+                let bestKey = null, bestSize = -1;
+                for (const [k, list] of groups) {
+                    if (!list.length || k === prev) continue;
+                    if (list.length > bestSize) { bestSize = list.length; bestKey = k; }
+                }
+                if (bestKey == null) {
+                    for (const [k, list] of groups) {
+                        if (list.length) { bestKey = k; break; }
+                    }
+                }
+                out.push(groups.get(bestKey).pop());
+                prev = bestKey;
+            }
+            for (let i = 0; i < out.length; i++) arr[i] = out[i];
+            return arr;
         }
 
         function spaceOutQuestionTexts(arr) {
